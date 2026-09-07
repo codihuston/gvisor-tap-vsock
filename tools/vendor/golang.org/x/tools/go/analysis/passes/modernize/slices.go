@@ -27,7 +27,7 @@ var AppendClippedAnalyzer = &analysis.Analyzer{
 	Doc:      analyzerutil.MustExtractDoc(doc, "appendclipped"),
 	Requires: []*analysis.Analyzer{inspect.Analyzer},
 	Run:      appendclipped,
-	URL:      "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#appendclipped",
+	URL:      "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#hdr-Analyzer_appendclipped",
 }
 
 // The appendclipped pass offers to simplify a tower of append calls:
@@ -144,8 +144,7 @@ func appendclipped(pass *analysis.Pass) (any, error) {
 			// https://go.dev/issue/70815#issuecomment-2671572984
 			fileImports := func(path string) bool {
 				return slices.ContainsFunc(file.Imports, func(spec *ast.ImportSpec) bool {
-					value, _ := strconv.Unquote(spec.Path.Value)
-					return value == path
+					return first(strconv.Unquote(spec.Path.Value)) == path
 				})
 			}
 			clonepkg := cond(

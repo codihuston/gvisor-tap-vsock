@@ -46,14 +46,10 @@ func (lp *loadingPackage) analyzeRecursive(ctx context.Context, cancel context.C
 		// Load the direct dependencies, in parallel.
 		var wg sync.WaitGroup
 
-		wg.Add(len(lp.imports))
-
 		for _, imp := range lp.imports {
-			go func(imp *loadingPackage) {
+			wg.Go(func() {
 				imp.analyzeRecursive(ctx, cancel, loadMode, loadSem)
-
-				wg.Done()
-			}(imp)
+			})
 		}
 
 		wg.Wait()
@@ -517,7 +513,7 @@ func sizeOfValueTreeBytes(v any) int {
 
 func sizeOfReflectValueTreeBytes(rv reflect.Value, visitedPtrs map[uintptr]struct{}) int {
 	switch rv.Kind() {
-	case reflect.Ptr:
+	case reflect.Pointer:
 		ptrSize := int(rv.Type().Size())
 		if rv.IsNil() {
 			return ptrSize
@@ -535,8 +531,8 @@ func sizeOfReflectValueTreeBytes(rv reflect.Value, visitedPtrs map[uintptr]struc
 		return sizeOfReflectValueTreeBytes(rv.Elem(), visitedPtrs)
 	case reflect.Struct:
 		ret := 0
-		for i := range rv.NumField() {
-			ret += sizeOfReflectValueTreeBytes(rv.Field(i), visitedPtrs)
+		for _, field := range rv.Fields() {
+			ret += sizeOfReflectValueTreeBytes(field, visitedPtrs)
 		}
 		return ret
 	case reflect.Slice, reflect.Array, reflect.Chan:
