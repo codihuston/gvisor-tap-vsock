@@ -57,7 +57,7 @@ func UDP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mute
 		gatewayAddr = tcpip.AddrFrom4Slice(gatewayIP.To4())
 	}
 
-	return udp.NewForwarder(s, func(r *udp.ForwarderRequest) {
+	return udp.NewForwarder(s, func(r *udp.ForwarderRequest) bool {
 		localAddress := r.ID().LocalAddress
 		localPort := r.ID().LocalPort
 
@@ -74,11 +74,13 @@ func UDP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mute
 				log.Debugf("Blocking outbound UDP to %s:%d (outboundAllow active, non-gateway)",
 					localAddress.String(), localPort)
 			}
-			return
+			// Mark handled so the stack does not send back an ICMP port
+			// unreachable for a deliberately blocked destination.
+			return true
 		}
 
 		if linkLocal().Contains(localAddress) || localAddress == header.IPv4Broadcast {
-			return
+			return true
 		}
 
 		natLock.Lock()
@@ -96,7 +98,7 @@ func UDP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mute
 			} else {
 				log.Errorf("r.CreateEndpoint() = %v", tcpErr)
 			}
-			return
+			return false
 		}
 
 		p, _ := NewUDPProxy(&autoStoppingListener{underlying: gonet.NewUDPConn(&wq, ep)}, func() (net.Conn, error) {
@@ -110,5 +112,6 @@ func UDP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mute
 			// forwarder request.
 			ep.Close()
 		}()
+		return true
 	})
 }
