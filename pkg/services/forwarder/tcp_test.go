@@ -31,6 +31,7 @@ func TestTCPRoutingAction(t *testing.T) {
 		localPort        uint16
 		blockAllOutbound bool
 		allowlistActive  bool
+		gatewayPortAllow map[uint16]bool
 		expected         tcpAction
 	}{
 		// --- No filtering (baseline) ---
@@ -227,20 +228,38 @@ func TestTCPRoutingAction(t *testing.T) {
 
 		// --- Allowlist tests ---
 		{
-			name:             "AllowlistGateway",
+			name:             "AllowlistGatewayNoPortConfigured",
 			localAddress:     gateway,
 			localPort:        80,
 			blockAllOutbound: false,
 			allowlistActive:  true,
-			expected:         tcpDirect,
+			expected:         tcpBlock,
 		},
 		{
-			name:             "AllowlistGatewayPort443",
+			name:             "AllowlistGatewayNoPortConfiguredPort443",
 			localAddress:     gateway,
 			localPort:        443,
 			blockAllOutbound: false,
 			allowlistActive:  true,
+			expected:         tcpBlock,
+		},
+		{
+			name:             "AllowlistGatewayConfiguredPortReachable",
+			localAddress:     gateway,
+			localPort:        80,
+			blockAllOutbound: false,
+			allowlistActive:  true,
+			gatewayPortAllow: map[uint16]bool{80: true},
 			expected:         tcpDirect,
+		},
+		{
+			name:             "AllowlistGatewayUnconfiguredPortRefused",
+			localAddress:     gateway,
+			localPort:        443,
+			blockAllOutbound: false,
+			allowlistActive:  true,
+			gatewayPortAllow: map[uint16]bool{80: true},
+			expected:         tcpBlock,
 		},
 		{
 			name:             "AllowlistPort443",
@@ -317,22 +336,41 @@ func TestTCPRoutingAction(t *testing.T) {
 			expected:         tcpBlock,
 		},
 
-		// --- Allowlist: gateway with special ports ---
+		// --- Allowlist: gateway with special ports, configured ---
 		{
-			name:             "AllowlistGatewayPort0",
+			name:             "AllowlistGatewayPort0Configured",
 			localAddress:     gateway,
 			localPort:        0,
 			blockAllOutbound: false,
 			allowlistActive:  true,
+			gatewayPortAllow: map[uint16]bool{0: true},
 			expected:         tcpDirect,
 		},
 		{
-			name:             "AllowlistGatewayPort65535",
+			name:             "AllowlistGatewayPort65535Configured",
 			localAddress:     gateway,
 			localPort:        65535,
 			blockAllOutbound: false,
 			allowlistActive:  true,
+			gatewayPortAllow: map[uint16]bool{65535: true},
 			expected:         tcpDirect,
+		},
+		// --- Allowlist: gateway with special ports, NOT configured ---
+		{
+			name:             "AllowlistGatewayPort0Unconfigured",
+			localAddress:     gateway,
+			localPort:        0,
+			blockAllOutbound: false,
+			allowlistActive:  true,
+			expected:         tcpBlock,
+		},
+		{
+			name:             "AllowlistGatewayPort65535Unconfigured",
+			localAddress:     gateway,
+			localPort:        65535,
+			blockAllOutbound: false,
+			allowlistActive:  true,
+			expected:         tcpBlock,
 		},
 
 		// --- No filtering: boundary ports ---
@@ -357,7 +395,7 @@ func TestTCPRoutingAction(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := tcpRoutingAction(tt.localAddress, tt.localPort,
-				tt.blockAllOutbound, tt.allowlistActive, gateway)
+				tt.blockAllOutbound, tt.allowlistActive, gateway, tt.gatewayPortAllow)
 			require.Equal(t, tt.expected, got)
 		})
 	}
@@ -381,12 +419,14 @@ func TestTCPBlockAllOutboundIsAbsolute(t *testing.T) {
 	}
 	ports := []uint16{0, 1, 22, 53, 80, 443, 444, 8080, 8443, 65535}
 
+	gatewayPortAllow := map[uint16]bool{80: true, 443: true}
+
 	for _, addr := range addresses {
 		for _, port := range ports {
 			for _, allowlist := range []bool{false, true} {
-				action := tcpRoutingAction(addr, port, true, allowlist, gateway)
+				action := tcpRoutingAction(addr, port, true, allowlist, gateway, gatewayPortAllow)
 				require.Equal(t, tcpBlock, action,
-					"blockAllOutbound must block addr=%s port=%d allowlist=%v",
+					"blockAllOutbound must block addr=%s port=%d allowlist=%v even with a gatewayPortAllow entry",
 					addr.String(), port, allowlist)
 			}
 		}
@@ -409,7 +449,7 @@ func TestTCPNoFilteringAlwaysAllows(t *testing.T) {
 
 	for _, addr := range addresses {
 		for _, port := range ports {
-			action := tcpRoutingAction(addr, port, false, false, gateway)
+			action := tcpRoutingAction(addr, port, false, false, gateway, nil)
 			require.Equal(t, tcpDirect, action,
 				"no filtering must allow addr=%s port=%d",
 				addr.String(), port)
@@ -426,50 +466,78 @@ func TestTCPAllowlistOnly443PassesTLS(t *testing.T) {
 
 	blockedPorts := []uint16{0, 1, 22, 53, 80, 442, 444, 8080, 8443, 65535}
 	for _, port := range blockedPorts {
-		action := tcpRoutingAction(other, port, false, true, gateway)
+		action := tcpRoutingAction(other, port, false, true, gateway, nil)
 		require.Equal(t, tcpBlock, action,
 			"allowlist must block non-443 port=%d", port)
 	}
 
-	action := tcpRoutingAction(other, 443, false, true, gateway)
+	action := tcpRoutingAction(other, 443, false, true, gateway, nil)
 	require.Equal(t, tcpTLSAllowlist, action,
 		"allowlist must TLS-inspect port 443")
 }
 
-// TestTCPAllowlistGatewayAlwaysExempt verifies that the gateway address
-// bypasses the allowlist on any port.
-func TestTCPAllowlistGatewayAlwaysExempt(t *testing.T) {
+// TestTCPAllowlistGatewayPortAllowlist verifies the register #1 fix in both
+// directions: with the allowlist active, a port named in gatewayPortAllow is
+// reachable on the gateway address and every other port is refused —
+// including with no gatewayPortAllow configured at all (default none),
+// where every port on the gateway is refused, matching the captain's
+// "default none, named ports reachable, everything else refused" ruling.
+func TestTCPAllowlistGatewayPortAllowlist(t *testing.T) {
 	gateway := tcpip.AddrFrom4([4]byte{192, 168, 1, 1})
 
-	ports := []uint16{0, 1, 22, 53, 80, 443, 8080, 65535}
-	for _, port := range ports {
-		action := tcpRoutingAction(gateway, port, false, true, gateway)
-		require.Equal(t, tcpDirect, action,
-			"gateway must be exempt on port=%d", port)
-	}
+	t.Run("DefaultNoneRefusesEveryPort", func(t *testing.T) {
+		for _, port := range []uint16{0, 1, 22, 53, 80, 443, 8080, 65535} {
+			action := tcpRoutingAction(gateway, port, false, true, gateway, nil)
+			require.Equal(t, tcpBlock, action,
+				"gateway port=%d must be refused with no gatewayPortAllow configured", port)
+		}
+	})
+
+	t.Run("ConfiguredPortReachable", func(t *testing.T) {
+		gatewayPortAllow := map[uint16]bool{8080: true, 9000: true}
+		for _, port := range []uint16{8080, 9000} {
+			action := tcpRoutingAction(gateway, port, false, true, gateway, gatewayPortAllow)
+			require.Equal(t, tcpDirect, action,
+				"configured gateway port=%d must be reachable", port)
+		}
+	})
+
+	t.Run("UnconfiguredPortRefused", func(t *testing.T) {
+		gatewayPortAllow := map[uint16]bool{8080: true}
+		for _, port := range []uint16{0, 1, 22, 53, 80, 443, 8079, 8081, 65535} {
+			action := tcpRoutingAction(gateway, port, false, true, gateway, gatewayPortAllow)
+			require.Equal(t, tcpBlock, action,
+				"unconfigured gateway port=%d must be refused", port)
+		}
+	})
 }
 
 // TestTCPRoutingActionZeroGateway verifies behavior when no gateway IP is
 // configured (zero-value address). No address should match the gateway
-// exemption, so all allowlist traffic is filtered normally.
+// port-allowlist path except the zero address itself, and even that stays
+// blocked with no gatewayPortAllow configured.
 func TestTCPRoutingActionZeroGateway(t *testing.T) {
 	var zeroGateway tcpip.Address
 	other := tcpip.AddrFrom4([4]byte{8, 8, 8, 8})
 
-	// Port 443 goes to TLS inspection (not exempted as gateway)
-	action := tcpRoutingAction(other, 443, false, true, zeroGateway)
+	// Port 443 goes to TLS inspection (not the gateway address)
+	action := tcpRoutingAction(other, 443, false, true, zeroGateway, nil)
 	require.Equal(t, tcpTLSAllowlist, action)
 
 	// Non-443 is blocked
-	action = tcpRoutingAction(other, 80, false, true, zeroGateway)
+	action = tcpRoutingAction(other, 80, false, true, zeroGateway, nil)
 	require.Equal(t, tcpBlock, action)
 
-	// Zero address to zero gateway — technically matches, gets exempted
-	action = tcpRoutingAction(zeroGateway, 80, false, true, zeroGateway)
+	// Zero address to zero gateway — matches, but no port is allowed by default
+	action = tcpRoutingAction(zeroGateway, 80, false, true, zeroGateway, nil)
+	require.Equal(t, tcpBlock, action)
+
+	// Zero address to zero gateway with its port explicitly allowed
+	action = tcpRoutingAction(zeroGateway, 80, false, true, zeroGateway, map[uint16]bool{80: true})
 	require.Equal(t, tcpDirect, action)
 
 	// blockAllOutbound still blocks everything
-	action = tcpRoutingAction(other, 443, true, true, zeroGateway)
+	action = tcpRoutingAction(other, 443, true, true, zeroGateway, nil)
 	require.Equal(t, tcpBlock, action)
 }
 

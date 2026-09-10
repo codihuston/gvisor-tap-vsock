@@ -9,11 +9,17 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/containers/gvisor-tap-vsock/pkg/types"
 	"github.com/miekg/dns"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/time/rate"
 )
+
+// dnsDenialLog rate-limits the "blocked DNS query" Info log so a guest
+// retrying a blocked destination cannot flood the host's logs.
+var dnsDenialLog = rate.Sometimes{Interval: 30 * time.Second}
 
 type upstreamResolver interface {
 	LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error)
@@ -140,7 +146,9 @@ func (h *dnsHandler) addAnswers(m *dns.Msg) {
 		if len(h.outboundAllow) > 0 {
 			domain := strings.ToLower(strings.TrimSuffix(q.Name, "."))
 			if !matchesAllowlist(domain, h.outboundAllow) {
-				log.Debugf("Blocking DNS query for %q (not in outboundAllow)", domain)
+				dnsDenialLog.Do(func() {
+					log.Infof("Blocking DNS query for %q (not in outboundAllow)", domain)
+				})
 				m.Rcode = dns.RcodeNameError
 				return
 			}

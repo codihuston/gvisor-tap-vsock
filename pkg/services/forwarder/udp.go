@@ -23,23 +23,34 @@ const (
 )
 
 // udpRoutingAction decides what to do with an inbound UDP packet based on
-// the destination address and active filtering configuration.
+// the destination address, port, and active filtering configuration.
+// gatewayPortAllow names the only ports on gatewayAddr reachable while the
+// allowlist is active (default: none) — gatewayAddr is otherwise filtered
+// exactly like any other destination, never exempted outright.
 func udpRoutingAction(
 	localAddress tcpip.Address,
+	localPort uint16,
 	blockAllOutbound bool,
 	allowlistActive bool,
 	gatewayAddr tcpip.Address,
+	gatewayPortAllow map[uint16]bool,
 ) udpAction {
 	if blockAllOutbound {
 		return udpBlock
 	}
-	if allowlistActive && localAddress != gatewayAddr {
+	if allowlistActive {
+		if localAddress == gatewayAddr {
+			if gatewayPortAllow[localPort] {
+				return udpDirect
+			}
+			return udpBlock
+		}
 		return udpBlock
 	}
 	return udpDirect
 }
 
-func UDP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mutex, blockAllOutbound bool, outboundAllow []*regexp.Regexp, gatewayIP net.IP) *udp.Forwarder {
+func UDP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mutex, blockAllOutbound bool, outboundAllow []*regexp.Regexp, gatewayIP net.IP, gatewayPortAllow map[uint16]bool) *udp.Forwarder {
 	allowlistActive := len(outboundAllow) > 0
 	var gatewayAddr tcpip.Address
 	if gatewayIP != nil {
@@ -48,15 +59,20 @@ func UDP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mute
 
 	return udp.NewForwarder(s, func(r *udp.ForwarderRequest) {
 		localAddress := r.ID().LocalAddress
+		localPort := r.ID().LocalPort
 
-		action := udpRoutingAction(localAddress, blockAllOutbound, allowlistActive, gatewayAddr)
+		action := udpRoutingAction(localAddress, localPort, blockAllOutbound, allowlistActive, gatewayAddr, gatewayPortAllow)
 		if action == udpBlock {
-			if blockAllOutbound {
+			switch {
+			case blockAllOutbound:
 				log.Debugf("Blocking outbound UDP to %s:%d (blockAllOutbound=true)",
-					localAddress.String(), r.ID().LocalPort)
-			} else {
+					localAddress.String(), localPort)
+			case localAddress == gatewayAddr:
+				log.Debugf("Blocking outbound UDP to gateway %s:%d (not in gatewayPortAllow)",
+					localAddress.String(), localPort)
+			default:
 				log.Debugf("Blocking outbound UDP to %s:%d (outboundAllow active, non-gateway)",
-					localAddress.String(), r.ID().LocalPort)
+					localAddress.String(), localPort)
 			}
 			return
 		}

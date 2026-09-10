@@ -36,9 +36,14 @@ func addServices(configuration *types.Configuration, s *stack.Stack, ipPool *tap
 	}
 	gatewayIP := net.ParseIP(configuration.GatewayIP)
 
-	tcpForwarder := forwarder.TCP(s, translation, &natLock, configuration.Ec2MetadataAccess, configuration.BlockAllOutbound, outboundAllow, gatewayIP)
+	gatewayPortAllow := make(map[uint16]bool, len(configuration.GatewayPortAllow))
+	for _, port := range configuration.GatewayPortAllow {
+		gatewayPortAllow[port] = true
+	}
+
+	tcpForwarder := forwarder.TCP(s, translation, &natLock, configuration.Ec2MetadataAccess, configuration.BlockAllOutbound, outboundAllow, gatewayIP, gatewayPortAllow)
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpForwarder.HandlePacket)
-	udpForwarder := forwarder.UDP(s, translation, &natLock, configuration.BlockAllOutbound, outboundAllow, gatewayIP)
+	udpForwarder := forwarder.UDP(s, translation, &natLock, configuration.BlockAllOutbound, outboundAllow, gatewayIP, gatewayPortAllow)
 	s.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder.HandlePacket)
 
 	dnsMux, err := dnsServer(configuration, s, outboundAllow)

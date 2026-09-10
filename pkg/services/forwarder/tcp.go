@@ -11,11 +11,23 @@ import (
 
 	"github.com/containers/gvisor-tap-vsock/pkg/tcpproxy"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/time/rate"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/waiter"
+)
+
+// denialLogInterval bounds how often the same class of TLS denial logs at
+// Info level: a guest retrying a blocked destination must not be able to
+// flood the host's logs, but distinct denial classes (SNI mismatch vs DNS
+// cross-check mismatch) log independently.
+const denialLogInterval = 30 * time.Second
+
+var (
+	sniMismatchLog   = rate.Sometimes{Interval: denialLogInterval}
+	sniCrossCheckLog = rate.Sometimes{Interval: denialLogInterval}
 )
 
 const (
@@ -33,19 +45,26 @@ const (
 
 // tcpRoutingAction decides what to do with an inbound TCP connection based on
 // the destination address, port, and active filtering configuration.
+// gatewayPortAllow names the only ports on gatewayAddr reachable while the
+// allowlist is active (default: none) — gatewayAddr is otherwise filtered
+// exactly like any other destination, never exempted outright.
 func tcpRoutingAction(
 	localAddress tcpip.Address,
 	localPort uint16,
 	blockAllOutbound bool,
 	allowlistActive bool,
 	gatewayAddr tcpip.Address,
+	gatewayPortAllow map[uint16]bool,
 ) tcpAction {
 	if blockAllOutbound {
 		return tcpBlock
 	}
 	if allowlistActive {
 		if localAddress == gatewayAddr {
-			return tcpDirect
+			if gatewayPortAllow[localPort] {
+				return tcpDirect
+			}
+			return tcpBlock
 		}
 		if localPort == 443 {
 			return tcpTLSAllowlist
@@ -55,7 +74,7 @@ func tcpRoutingAction(
 	return tcpDirect
 }
 
-func TCP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mutex, ec2MetadataAccess bool, blockAllOutbound bool, outboundAllow []*regexp.Regexp, gatewayIP net.IP) *tcp.Forwarder {
+func TCP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mutex, ec2MetadataAccess bool, blockAllOutbound bool, outboundAllow []*regexp.Regexp, gatewayIP net.IP, gatewayPortAllow map[uint16]bool) *tcp.Forwarder {
 	allowlistActive := len(outboundAllow) > 0
 	var gatewayAddr tcpip.Address
 	if gatewayIP != nil {
@@ -65,13 +84,17 @@ func TCP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mute
 	return tcp.NewForwarder(s, 0, 10, func(r *tcp.ForwarderRequest) {
 		localAddress := r.ID().LocalAddress
 		action := tcpRoutingAction(localAddress, r.ID().LocalPort,
-			blockAllOutbound, allowlistActive, gatewayAddr)
+			blockAllOutbound, allowlistActive, gatewayAddr, gatewayPortAllow)
 		switch action {
 		case tcpBlock:
-			if blockAllOutbound {
+			switch {
+			case blockAllOutbound:
 				log.Debugf("Blocking outbound TCP to %s:%d (blockAllOutbound=true)",
 					localAddress.String(), r.ID().LocalPort)
-			} else {
+			case localAddress == gatewayAddr:
+				log.Debugf("Blocking outbound TCP to gateway %s:%d (not in gatewayPortAllow)",
+					localAddress.String(), r.ID().LocalPort)
+			default:
 				log.Debugf("Blocking outbound TCP to %s:%d (outboundAllow active, non-443 port)",
 					localAddress.String(), r.ID().LocalPort)
 			}
@@ -168,7 +191,9 @@ func handleTLSWithAllowlist(r *tcp.ForwarderRequest, nat map[tcpip.Address]tcpip
 	}
 
 	if !MatchesAllowlist(sni, outboundAllow) {
-		log.Debugf("Blocking TLS to %s: SNI %q not in allowlist", localAddress.String(), sni)
+		sniMismatchLog.Do(func() {
+			log.Infof("Blocking TLS to %s: SNI %q not in allowlist", localAddress.String(), sni)
+		})
 		guestConn.Close()
 		return
 	}
@@ -185,8 +210,10 @@ func handleTLSWithAllowlist(r *tcp.ForwarderRequest, nat map[tcpip.Address]tcpip
 		return
 	}
 	if !sniMatchesDestination(localAddress, resolvedIPs) {
-		log.Debugf("Blocking TLS to %s: SNI %q resolves to %v, not %s (possible SNI spoofing)",
-			localAddress.String(), sni, resolvedIPs, localAddress.String())
+		sniCrossCheckLog.Do(func() {
+			log.Infof("Blocking TLS to %s: SNI %q resolves to %v, not %s (possible SNI spoofing)",
+				localAddress.String(), sni, resolvedIPs, localAddress.String())
+		})
 		guestConn.Close()
 		return
 	}
