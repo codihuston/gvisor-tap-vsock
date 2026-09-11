@@ -1,6 +1,7 @@
 package forwarder
 
 import (
+	"github.com/containers/gvisor-tap-vsock/pkg/services/egresslog"
 	"net"
 	"regexp"
 	"strconv"
@@ -26,20 +27,28 @@ const (
 // the destination address and active filtering configuration.
 func udpRoutingAction(
 	localAddress tcpip.Address,
+	localPort uint16,
 	blockAllOutbound bool,
 	allowlistActive bool,
 	gatewayAddr tcpip.Address,
+	gatewayPorts []int,
 ) udpAction {
+	if gatewayAddr.Len() != 0 && localAddress == gatewayAddr {
+		if gatewayPortAllowed(localPort, gatewayPorts) {
+			return udpDirect
+		}
+		return udpBlock
+	}
 	if blockAllOutbound {
 		return udpBlock
 	}
-	if allowlistActive && localAddress != gatewayAddr {
+	if allowlistActive {
 		return udpBlock
 	}
 	return udpDirect
 }
 
-func UDP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mutex, blockAllOutbound bool, outboundAllow []*regexp.Regexp, gatewayIP net.IP) *udp.Forwarder {
+func UDP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mutex, blockAllOutbound bool, outboundAllow []*regexp.Regexp, gatewayIP net.IP, gatewayPorts []int) *udp.Forwarder {
 	allowlistActive := len(outboundAllow) > 0
 	var gatewayAddr tcpip.Address
 	if gatewayIP != nil {
@@ -49,15 +58,9 @@ func UDP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mute
 	return udp.NewForwarder(s, func(r *udp.ForwarderRequest) {
 		localAddress := r.ID().LocalAddress
 
-		action := udpRoutingAction(localAddress, blockAllOutbound, allowlistActive, gatewayAddr)
+		action := udpRoutingAction(localAddress, r.ID().LocalPort, blockAllOutbound, allowlistActive, gatewayAddr, gatewayPorts)
 		if action == udpBlock {
-			if blockAllOutbound {
-				log.Debugf("Blocking outbound UDP to %s:%d (blockAllOutbound=true)",
-					localAddress.String(), r.ID().LocalPort)
-			} else {
-				log.Debugf("Blocking outbound UDP to %s:%d (outboundAllow active, non-gateway)",
-					localAddress.String(), r.ID().LocalPort)
-			}
+			egresslog.Default.Denied(egresslog.UDP, "Blocking outbound UDP to %s:%d (%s)", localAddress.String(), r.ID().LocalPort, denialReason(localAddress, gatewayAddr, blockAllOutbound))
 			return
 		}
 

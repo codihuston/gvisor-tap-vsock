@@ -248,3 +248,22 @@ Notification types:
 
 ## Development
 Developers who want to work on gvisor-tap-vsock should visit the [Development](./DEVELOPMENT.md) document.
+
+### Kitchen gateway policy
+
+`gatewayAllowedPorts` is an explicit list of host TCP/UDP ports reachable through
+`GatewayIP` and its NAT mapping. It defaults to none even with filtering disabled.
+The gateway check runs before `blockAllOutbound` and the TLS port/SNI check, so
+`gatewayAllowedPorts: [8080]` preserves that broker while `blockAllOutbound: true`
+refuses external forwarding. An unlisted gateway port never falls through to TLS
+inspection, including port 443. In-stack services such as DNS on port 53 are served
+locally and are not forwarded to the host. Host-to-guest forwards are independent.
+
+DNS and TCP/UDP/TLS denials log at Info, limited to one record per reason per
+second. The next emitted record includes the suppressed count. The limiter uses
+fixed storage per reason, so varied guest hostnames cannot grow a logging cache.
+
+The routing matrix and `pkg/virtualnetwork` packet tests cover listed/unlisted
+TCP and UDP ports, precedence, DNS and host-to-guest connections. Kitchen's
+`make fork-test` also feeds fresh production-rendered entries through Lima's
+strict config decoder into these packet tests and both DNS/SNI matcher suites.

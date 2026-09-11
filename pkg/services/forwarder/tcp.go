@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/containers/gvisor-tap-vsock/pkg/services/egresslog"
 	"github.com/containers/gvisor-tap-vsock/pkg/tcpproxy"
 	log "github.com/sirupsen/logrus"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -39,14 +40,18 @@ func tcpRoutingAction(
 	blockAllOutbound bool,
 	allowlistActive bool,
 	gatewayAddr tcpip.Address,
+	gatewayPorts []int,
 ) tcpAction {
+	if gatewayAddr.Len() != 0 && localAddress == gatewayAddr {
+		if gatewayPortAllowed(localPort, gatewayPorts) {
+			return tcpDirect
+		}
+		return tcpBlock
+	}
 	if blockAllOutbound {
 		return tcpBlock
 	}
 	if allowlistActive {
-		if localAddress == gatewayAddr {
-			return tcpDirect
-		}
 		if localPort == 443 {
 			return tcpTLSAllowlist
 		}
@@ -55,7 +60,7 @@ func tcpRoutingAction(
 	return tcpDirect
 }
 
-func TCP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mutex, ec2MetadataAccess bool, blockAllOutbound bool, outboundAllow []*regexp.Regexp, gatewayIP net.IP) *tcp.Forwarder {
+func TCP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mutex, ec2MetadataAccess bool, blockAllOutbound bool, outboundAllow []*regexp.Regexp, gatewayIP net.IP, gatewayPorts []int) *tcp.Forwarder {
 	allowlistActive := len(outboundAllow) > 0
 	var gatewayAddr tcpip.Address
 	if gatewayIP != nil {
@@ -65,16 +70,10 @@ func TCP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mute
 	return tcp.NewForwarder(s, 0, 10, func(r *tcp.ForwarderRequest) {
 		localAddress := r.ID().LocalAddress
 		action := tcpRoutingAction(localAddress, r.ID().LocalPort,
-			blockAllOutbound, allowlistActive, gatewayAddr)
+			blockAllOutbound, allowlistActive, gatewayAddr, gatewayPorts)
 		switch action {
 		case tcpBlock:
-			if blockAllOutbound {
-				log.Debugf("Blocking outbound TCP to %s:%d (blockAllOutbound=true)",
-					localAddress.String(), r.ID().LocalPort)
-			} else {
-				log.Debugf("Blocking outbound TCP to %s:%d (outboundAllow active, non-443 port)",
-					localAddress.String(), r.ID().LocalPort)
-			}
+			egresslog.Default.Denied(egresslog.TCP, "Blocking outbound TCP to %s:%d (%s)", localAddress.String(), r.ID().LocalPort, denialReason(localAddress, gatewayAddr, blockAllOutbound))
 			r.Complete(true)
 		case tcpTLSAllowlist:
 			handleTLSWithAllowlist(r, nat, natLock, localAddress, outboundAllow)
@@ -162,13 +161,13 @@ func handleTLSWithAllowlist(r *tcp.ForwarderRequest, nat map[tcpip.Address]tcpip
 	_ = guestConn.SetReadDeadline(time.Time{})
 
 	if err != nil {
-		log.Debugf("Blocking TLS to %s: SNI parse error: %v", localAddress.String(), err)
+		egresslog.Default.Denied(egresslog.SNIParse, "Blocking TLS to %s: SNI parse error: %v", localAddress.String(), err)
 		guestConn.Close()
 		return
 	}
 
 	if !MatchesAllowlist(sni, outboundAllow) {
-		log.Debugf("Blocking TLS to %s: SNI %q not in allowlist", localAddress.String(), sni)
+		egresslog.Default.Denied(egresslog.SNIMismatch, "Blocking TLS to %s: SNI %q not in allowlist", localAddress.String(), sni)
 		guestConn.Close()
 		return
 	}
@@ -180,12 +179,12 @@ func handleTLSWithAllowlist(r *tcp.ForwarderRequest, nat map[tcpip.Address]tcpip
 	defer dnsCancel()
 	resolvedIPs, dnsErr := net.DefaultResolver.LookupIPAddr(dnsCtx, sni)
 	if dnsErr != nil {
-		log.Debugf("Blocking TLS to %s: SNI %q DNS lookup failed: %v", localAddress.String(), sni, dnsErr)
+		egresslog.Default.Denied(egresslog.SNILookup, "Blocking TLS to %s: SNI %q DNS lookup failed: %v", localAddress.String(), sni, dnsErr)
 		guestConn.Close()
 		return
 	}
 	if !sniMatchesDestination(localAddress, resolvedIPs) {
-		log.Debugf("Blocking TLS to %s: SNI %q resolves to %v, not %s (possible SNI spoofing)",
+		egresslog.Default.Denied(egresslog.SNIDestination, "Blocking TLS to %s: SNI %q resolves to %v, not %s (possible SNI spoofing)",
 			localAddress.String(), sni, resolvedIPs, localAddress.String())
 		guestConn.Close()
 		return

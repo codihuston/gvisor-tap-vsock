@@ -23,6 +23,11 @@ import (
 )
 
 func addServices(configuration *types.Configuration, s *stack.Stack, ipPool *tap.IPPool) (http.Handler, error) {
+	for _, port := range configuration.GatewayAllowedPorts {
+		if port < 1 || port > 65535 {
+			return nil, fmt.Errorf("invalid gatewayAllowedPorts port %d: expected 1..65535", port)
+		}
+	}
 	var natLock sync.Mutex
 	translation := parseNATTable(configuration)
 
@@ -36,9 +41,9 @@ func addServices(configuration *types.Configuration, s *stack.Stack, ipPool *tap
 	}
 	gatewayIP := net.ParseIP(configuration.GatewayIP)
 
-	tcpForwarder := forwarder.TCP(s, translation, &natLock, configuration.Ec2MetadataAccess, configuration.BlockAllOutbound, outboundAllow, gatewayIP)
+	tcpForwarder := forwarder.TCP(s, translation, &natLock, configuration.Ec2MetadataAccess, configuration.BlockAllOutbound, outboundAllow, gatewayIP, configuration.GatewayAllowedPorts)
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpForwarder.HandlePacket)
-	udpForwarder := forwarder.UDP(s, translation, &natLock, configuration.BlockAllOutbound, outboundAllow, gatewayIP)
+	udpForwarder := forwarder.UDP(s, translation, &natLock, configuration.BlockAllOutbound, outboundAllow, gatewayIP, configuration.GatewayAllowedPorts)
 	s.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder.HandlePacket)
 
 	dnsMux, err := dnsServer(configuration, s, outboundAllow)

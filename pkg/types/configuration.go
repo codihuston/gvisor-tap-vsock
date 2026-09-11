@@ -54,14 +54,19 @@ type Configuration struct {
 	// EC2 Metadata Service Access
 	Ec2MetadataAccess bool `yaml:"ec2MetadataAccess,omitempty"`
 
-	// Block all guest-initiated outbound TCP/UDP connections (host→guest forwarding still works)
+	// Block external guest-initiated TCP/UDP connections. Explicit gateway
+	// ports and host→guest forwarding still work.
 	BlockAllOutbound bool `yaml:"blockAllOutbound,omitempty"`
 
 	// OutboundAllow is a list of regex patterns for allowed outbound domains.
 	// When non-empty, all outbound is blocked except DNS queries and TLS connections
-	// (port 443) whose SNI matches at least one pattern. Internal gateway traffic
-	// is always permitted. Each string is compiled as a regexp at startup.
+	// (port 443) whose SNI matches at least one pattern. Gateway forwarding is
+	// independently controlled by GatewayAllowedPorts. Each pattern is compiled at startup.
 	OutboundAllow []string `yaml:"outboundAllow,omitempty"`
+	// GatewayAllowedPorts permits forwarding to these TCP/UDP ports on GatewayIP.
+	// Default none, including when outbound filtering is disabled. This policy is
+	// evaluated before BlockAllOutbound. In-stack DNS does not forward to the host.
+	GatewayAllowedPorts []int `yaml:"gatewayAllowedPorts,omitempty"`
 }
 
 type Protocol string

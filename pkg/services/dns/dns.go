@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/containers/gvisor-tap-vsock/pkg/services/egresslog"
 	"github.com/containers/gvisor-tap-vsock/pkg/types"
 	"github.com/miekg/dns"
 	log "github.com/sirupsen/logrus"
@@ -140,7 +141,7 @@ func (h *dnsHandler) addAnswers(m *dns.Msg) {
 		if len(h.outboundAllow) > 0 {
 			domain := strings.ToLower(strings.TrimSuffix(q.Name, "."))
 			if !matchesAllowlist(domain, h.outboundAllow) {
-				log.Debugf("Blocking DNS query for %q (not in outboundAllow)", domain)
+				egresslog.Default.Denied(egresslog.DNS, "Blocking DNS query for %q (not in outboundAllow)", domain)
 				m.Rcode = dns.RcodeNameError
 				return
 			}
