@@ -71,7 +71,7 @@ type checkContext struct {
 	isAtLeastGo124 bool
 }
 
-func (checkCtx checkContext) isUserDefined(key tagKey, opt string) bool {
+func (checkCtx *checkContext) isUserDefined(key tagKey, opt string) bool {
 	if checkCtx.userDefined == nil {
 		return false
 	}
@@ -97,17 +97,14 @@ func (checkCtx *checkContext) addCommonOption(opt string) {
 	checkCtx.commonOptions[opt] = true
 }
 
+var _ lint.ConfigurableRule = (*StructTagRule)(nil)
+
 // Configure validates the rule configuration, and configures the rule accordingly.
 //
 // Configuration implements the [lint.ConfigurableRule] interface.
 func (r *StructTagRule) Configure(arguments lint.Arguments) error {
 	if len(arguments) == 0 {
 		return nil
-	}
-
-	err := checkNumberOfArguments(1, arguments, r.Name())
-	if err != nil {
-		return err
 	}
 
 	r.userDefined = map[tagKey][]string{}
@@ -574,7 +571,7 @@ func checkProtobufOptions(checkCtx *checkContext, options []string) (message str
 	seenOptions := map[string]bool{}
 	hasName := false
 	for _, opt := range options {
-		opt := strings.Split(opt, "=")[0]
+		opt, _, _ := strings.Cut(opt, "=")
 
 		if number, err := strconv.Atoi(opt); err == nil {
 			_, alreadySeen := checkCtx.usedTagNbr[number]
@@ -636,7 +633,7 @@ func checkTOMLTag(checkCtx *checkContext, tag *structtag.Tag, _ *ast.Field) (mes
 }
 
 func checkURLTag(checkCtx *checkContext, tag *structtag.Tag, _ *ast.Field) (message string, succeeded bool) {
-	var delimiter = ""
+	var delimiter string
 	for _, opt := range tag.Options {
 		switch opt {
 		case "int", "omitempty", "numbered", "brackets",
@@ -801,6 +798,7 @@ func (w lintStructTagRule) addFailureWithTagKey(n ast.Node, msg, tagKey string) 
 
 func (w lintStructTagRule) addFailuref(n ast.Node, msg string, args ...any) {
 	w.onFailure(lint.Failure{
+		Category:   lint.FailureCategoryBadPractice,
 		Node:       n,
 		Failure:    fmt.Sprintf(msg, args...),
 		Confidence: 1,
@@ -808,8 +806,7 @@ func (w lintStructTagRule) addFailuref(n ast.Node, msg string, args ...any) {
 }
 
 func areValidateOpts(opts string) (string, bool) {
-	parts := strings.Split(opts, "|")
-	for _, opt := range parts {
+	for opt := range strings.SplitSeq(opts, "|") {
 		_, ok := validateSingleOptions[opt]
 		if !ok {
 			return opt, false
@@ -1003,7 +1000,7 @@ var validateSingleOptions = map[string]struct{}{
 	"validateFn":                    {},
 }
 
-// These are options that are used in expressions of the form:
+// validateLHS are options that are used in expressions of the form:
 //
 //	<option> = <RHS>
 var validateLHS = map[string]struct{}{
